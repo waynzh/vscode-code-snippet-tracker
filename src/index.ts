@@ -4,7 +4,7 @@ import * as diff from 'diff'
 
 // 定义正则表达式来检测 AI 生成和修改的代码块
 const AI_GENERATED_RE = /\/\/ #region @ai_generated(?:\s+id:([a-f0-9]{6}))?/
-const AI_MODIFIED_RE = /\/\/ #region @ai_modified\(\d+%\)(?:\s+id:([a-f0-9]{6}))?/
+const AI_MODIFIED_RE = /\/\/ #region @ai_modified\((\d+%\))(?:\s+id:([a-f0-9]{6}))?/
 const AI_REGION_END = /\/\/ #endregion/
 
 // 存储上一次保存的代码块内容
@@ -150,6 +150,7 @@ function processDocument(document: vscode.TextDocument) {
     content: string
     isGenerated: boolean
     modificationPercent: number
+    previousModificationPercent: number
   }> = []
 
   // 确保快照存在
@@ -163,30 +164,33 @@ function processDocument(document: vscode.TextDocument) {
   let currentBlockId = ''
   let blockContent = ''
   let isGenerated = false
+  let previousModificationPercent = 0
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
 
     if (!inBlock) {
-      // 检查是否是AI生成的代码块开始
+      // AI 生成的代码块
       const genMatch = AI_GENERATED_RE.exec(line)
       if (genMatch) {
         inBlock = true
         blockStartLine = i
-        currentBlockId = genMatch[1] || '' // 提取ID，如果有的话
+        currentBlockId = genMatch[1] || ''
         blockContent = ''
         isGenerated = true
+        previousModificationPercent = 0
         continue
       }
 
-      // 检查是否是AI修改的代码块开始
+      // AI 修改的代码块
       const modMatch = AI_MODIFIED_RE.exec(line)
       if (modMatch) {
         inBlock = true
         blockStartLine = i
-        currentBlockId = modMatch[2] || '' // 提取ID，如果有的话
+        currentBlockId = modMatch[2] || ''
         blockContent = ''
         isGenerated = false
+        previousModificationPercent = Number.parseInt(modMatch[1], 10)
         continue
       }
     }
@@ -201,9 +205,22 @@ function processDocument(document: vscode.TextDocument) {
 
       // 计算修改百分比
       let modificationPercent = 0
+
       if (lastBlockSnapshots[filePath][currentBlockId]) {
         const lastContent = lastBlockSnapshots[filePath][currentBlockId]
-        modificationPercent = calculateModificationPercentage(lastContent, blockContent)
+        const currentChangePercent = calculateModificationPercentage(lastContent, blockContent)
+
+        if (isGenerated) {
+          // 首次修改，直接使用计算的百分比
+          modificationPercent = currentChangePercent
+        }
+        else {
+          // 再次修改，使用累积公式
+          modificationPercent = calculateCumulativeModification(
+            previousModificationPercent,
+            currentChangePercent,
+          )
+        }
       }
 
       // 添加到待更新列表
@@ -214,6 +231,7 @@ function processDocument(document: vscode.TextDocument) {
         content: blockContent,
         isGenerated,
         modificationPercent,
+        previousModificationPercent,
       })
 
       // 更新快照
@@ -223,6 +241,7 @@ function processDocument(document: vscode.TextDocument) {
       currentBlockId = ''
       blockContent = ''
       isGenerated = false
+      previousModificationPercent = 0
     }
     else {
       // 累积代码块内容
@@ -379,6 +398,15 @@ function calculateModificationPercentage(originalContent: string, currentContent
   // 计算修改百分比
   const changeRatio = (addedLines + removedLines) / (2 * totalOriginalLines)
   return Math.min(100, Math.max(0, Math.round(changeRatio * 100)))
+}
+
+// 累积修改百分比计算
+function calculateCumulativeModification(previousPercent: number, currentChangePercent: number): number {
+  // 有效修改部分：当前修改所影响的未修改部分
+  const effectiveChange = (100 - previousPercent) * currentChangePercent / 100
+
+  // 总体修改百分比
+  return Math.min(100, Math.round(previousPercent + effectiveChange))
 }
 
 export function deactivate() {
