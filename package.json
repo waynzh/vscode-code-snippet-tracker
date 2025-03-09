@@ -33,6 +33,24 @@
     "onLanguage:typescript",
     "onLanguage:vue"
   ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "ai-code-tracker.generateReport",
+        "title": "AI Code Tracker: Generate Project Report"
+      }
+    ],
+    "configuration": {
+      "title": "AI Code Tracker",
+      "properties": {
+        "aiCodeTracker.modificationThreshold": {
+          "type": "number",
+          "default": 70,
+          "description": "Percentage threshold for removing AI code markers"
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "tsup src/index.ts --external vscode",
     "dev": "nr build --watch",
