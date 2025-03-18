@@ -2,7 +2,7 @@
   "publisher": "waynzh",
   "name": "code-snippet-tracker",
   "displayName": "AI Code Snippet Tracker",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "packageManager": "pnpm@9.3.0",
   "description": "Track and mark AI generated code in your frontend projects",
