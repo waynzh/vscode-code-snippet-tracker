@@ -4,9 +4,9 @@ import * as vscode from 'vscode'
 import * as diff from 'diff'
 
 // 定义正则表达式来检测带有ID的 AI 代码块
-const AI_GENERATED_RE = /\/\/ #region @ai_generated(?:\s+id:([a-f0-9]{6}))?/
-const AI_MODIFIED_RE = /\/\/ #region @ai_modified\((\d+%\))(?:\s+id:([a-f0-9]{6}))?/
-const AI_REGION_END = /\/\/ #endregion/
+const AI_GENERATED_RE = /(?:\/\/|<!--)\s*#region @ai_generated(?:\s+id:([a-f0-9]{6}))?(?:\s*-->)?/
+const AI_MODIFIED_RE = /(?:\/\/|<!--)\s*#region @ai_modified\((\d+%\))(?:\s+id:([a-f0-9]{6}))?(?:\s*-->)?/
+const AI_REGION_END = /(?:\/\/|<!--)\s*#endregion(?:\s*-->)?/
 
 // 状态栏项
 let statusBarItem: vscode.StatusBarItem
@@ -303,20 +303,25 @@ function processDocument(document: vscode.TextDocument) {
         delete lastBlockSnapshots[filePath][id]
         break
 
-      case 'modify':
+      case 'modify': {
+        const commentPrefix = lines[startLine].trim().startsWith('<!--') ? '<!-- ' : '// '
+        const commentSuffix = lines[endLine].trim().startsWith('<!--') ? ' -->' : ''
         edit.replace(
           document.uri,
           new vscode.Range(startLine, 0, startLine + 1, 0),
-          `${leadingSpaces}// #region @ai_modified(${Math.round(modificationPercent)}%) id:${id}\n`,
+          `${leadingSpaces}${commentPrefix}#region @ai_modified(${Math.round(modificationPercent)}%) id:${id}${commentSuffix}\n`,
         )
         break
+      }
 
       case 'ensure_id':
         if (!lines[startLine].includes('id:')) {
+          const commentPrefix = lines[startLine].trim().startsWith('<!--') ? '<!-- ' : '// '
+          const commentSuffix = lines[endLine].trim().startsWith('<!--') ? ' -->' : ''
           edit.replace(
             document.uri,
             new vscode.Range(startLine, 0, startLine + 1, 0),
-            `${leadingSpaces}// #region @ai_generated id:${id}\n`,
+            `${leadingSpaces}${commentPrefix}#region @ai_generated id:${id}${commentSuffix}\n`,
           )
         }
         break
