@@ -128,62 +128,51 @@ function captureBlockSnapshots(document: vscode.TextDocument): void {
 function extractAllCodeBlocks(text: string): BlockInfo[] {
   const lines = text.split('\n')
   const blocks: BlockInfo[] = []
-
-  let inBlock = false
-  let currentBlockId = ''
-  let blockContent = ''
-  let isGenerated = false
-  let modifiedPercent: number | undefined
-  let blockStartLine = -1
+  // 使用栈来处理嵌套
+  const blockStack: BlockInfo[] = []
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
 
-    if (!inBlock) {
-      // 检查是否是AI生成的代码块开始
-      const genMatch = AI_GENERATED_RE.exec(line)
-      if (genMatch) {
-        inBlock = true
-        blockStartLine = i
-        currentBlockId = genMatch[1] || ''
-        blockContent = ''
-        isGenerated = true
-        continue
-      }
+    // 检查是否是AI生成的代码块开始
+    const genMatch = AI_GENERATED_RE.exec(line)
+    const modMatch = AI_MODIFIED_RE.exec(line)
 
-      // 检查是否是AI修改的代码块开始
-      const modMatch = AI_MODIFIED_RE.exec(line)
-      if (modMatch) {
-        inBlock = true
-        blockStartLine = i
-        currentBlockId = modMatch[2] || ''
-        blockContent = ''
-        isGenerated = false
-        modifiedPercent = Number.parseInt(modMatch[1], 10)
-        continue
-      }
-    }
-    else if (AI_REGION_END.test(line)) {
-      // 代码块结束
-      inBlock = false
-      blocks.push({
-        id: currentBlockId || generateShortId(),
-        content: blockContent,
+    if (genMatch || modMatch) {
+      const isGenerated = !!genMatch
+      const match = isGenerated ? genMatch! : modMatch!
+
+      const newBlock: BlockInfo = {
+        id: match[isGenerated ? 1 : 2] || '',
+        content: '',
         isGenerated,
-        modifiedPercent,
-        startLine: blockStartLine,
-        endLine: i,
-      })
+        modifiedPercent: isGenerated ? undefined : Number.parseInt(match[1], 10),
+        startLine: i,
+        endLine: -1,
+      }
 
-      currentBlockId = ''
-      blockContent = ''
-      isGenerated = false
-      modifiedPercent = undefined
-      blockStartLine = -1
+      blockStack.push(newBlock)
+      continue
     }
-    else {
-      // 累积代码块内容
-      blockContent += `${line}\n`
+
+    if (AI_REGION_END.test(line)) {
+      if (blockStack.length === 0)
+        continue // 忽略多余的结束标记
+
+      const currentBlock = blockStack.pop()!
+      currentBlock.endLine = i
+      currentBlock.content = currentBlock.content.replace(/\n$/, '') // 移除最后一个换行
+
+      if (!currentBlock.id) {
+        currentBlock.id = generateShortId()
+      }
+
+      blocks.push(currentBlock)
+    }
+    else if (blockStack.length > 0) {
+      // 只处理最内层的块内容
+      const currentBlock = blockStack[blockStack.length - 1]
+      currentBlock.content += `${line}\n`
     }
   }
 
@@ -210,176 +199,128 @@ function processDocument(document: vscode.TextDocument) {
     lastBlockSnapshots[filePath] = {}
   }
 
-  // 第一遍扫描：查找需要处理的代码块
-  let inBlock = false
-  let blockStartLine = -1
-  let currentBlockId = ''
-  let blockContent = ''
-  let isGenerated = false
-  let previousModificationPercent = 0
+  // 使用栈结构处理嵌套块
+  const blockStack: Array<{
+    startLine: number
+    id: string
+    isGenerated: boolean
+    previousModificationPercent: number
+    content: string
+  }> = []
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
 
-    if (!inBlock) {
-      // 检查是否是AI生成的代码块开始
-      const genMatch = AI_GENERATED_RE.exec(line)
-      if (genMatch) {
-        inBlock = true
-        blockStartLine = i
-        currentBlockId = genMatch[1] || '' // 提取ID，如果有的话
-        blockContent = ''
-        isGenerated = true
-        continue
-      }
+    // 检查区域开始标记
+    const genMatch = AI_GENERATED_RE.exec(line)
+    const modMatch = AI_MODIFIED_RE.exec(line)
 
-      // 检查是否是AI修改的代码块开始
-      const modMatch = AI_MODIFIED_RE.exec(line)
-      if (modMatch) {
-        inBlock = true
-        blockStartLine = i
-        currentBlockId = modMatch[2] || '' // 提取ID，如果有的话
-        blockContent = ''
-        isGenerated = false
-        previousModificationPercent = Number.parseInt(modMatch[1], 10)
-        continue
-      }
+    if (genMatch || modMatch) {
+      const isGenerated = !!genMatch
+      const match = isGenerated ? genMatch! : modMatch!
+
+      // 压入新块到栈中
+      blockStack.push({
+        startLine: i,
+        id: match[isGenerated ? 1 : 2] || '',
+        isGenerated,
+        previousModificationPercent: isGenerated ? 0 : Number.parseInt(match[1], 10),
+        content: '',
+      })
+      continue
     }
-    else if (AI_REGION_END.test(line)) {
-      // 代码块结束
-      inBlock = false
 
-      // 如果没有ID，生成一个
-      if (!currentBlockId) {
-        currentBlockId = generateShortId()
-      }
+    // 检查区域结束标记
+    if (AI_REGION_END.test(line)) {
+      if (blockStack.length === 0)
+        continue // 忽略无效结束标记
+
+      // 弹出当前块
+      const currentBlock = blockStack.pop()!
+
+      // 生成ID（如果不存在）
+      const finalId = currentBlock.id || generateShortId()
 
       // 计算修改百分比
       let modificationPercent = 0
-      if (lastBlockSnapshots[filePath][currentBlockId]) {
-        const lastContent = lastBlockSnapshots[filePath][currentBlockId]
-        const currentChangePercent = calculateModificationPercentage(lastContent, blockContent)
+      if (lastBlockSnapshots[filePath][finalId]) {
+        const lastContent = lastBlockSnapshots[filePath][finalId]
+        const currentChangePercent = calculateModificationPercentage(
+          lastContent,
+          currentBlock.content,
+        )
 
-        if (isGenerated) {
-          // 首次修改，直接使用计算的百分比
-          modificationPercent = currentChangePercent
-        }
-        else {
-          // 再次修改，使用累积公式
-          modificationPercent = calculateCumulativeModification(
-            previousModificationPercent,
+        modificationPercent = currentBlock.isGenerated
+          ? currentChangePercent // 生成块直接使用当前修改率
+          : calculateCumulativeModification( // 修改块使用累积公式
+            currentBlock.previousModificationPercent,
             currentChangePercent,
           )
-        }
       }
 
-      // 添加到待更新列表
+      // 记录需要更新的块
       blocksToUpdate.push({
-        startLine: blockStartLine,
+        startLine: currentBlock.startLine,
         endLine: i,
-        id: currentBlockId,
-        content: blockContent,
-        isGenerated,
+        id: finalId,
+        content: currentBlock.content,
+        isGenerated: currentBlock.isGenerated,
         modificationPercent,
-        previousModificationPercent,
+        previousModificationPercent: currentBlock.previousModificationPercent,
       })
 
       // 更新快照
-      lastBlockSnapshots[filePath][currentBlockId] = blockContent
-
-      // 重置变量
-      currentBlockId = ''
-      blockContent = ''
-      isGenerated = false
-      previousModificationPercent = 0
+      lastBlockSnapshots[filePath][finalId] = currentBlock.content
     }
-    else {
-      // 累积代码块内容
-      blockContent += `${line}\n`
+    // 处理块内容（只处理最内层块）
+    else if (blockStack.length > 0) {
+      const currentBlock = blockStack[blockStack.length - 1]
+      currentBlock.content += `${line}\n`
     }
   }
 
-  // 没有需要处理的块，直接返回
-  if (blocksToUpdate.length === 0) {
+  // 没有需要处理的块则返回
+  if (blocksToUpdate.length === 0)
     return
-  }
 
-  // 应用更新
+  // 应用编辑操作
   const edit = new vscode.WorkspaceEdit()
 
-  // 倒序处理以避免行号变化影响
+  // 倒序处理避免行号变化
   blocksToUpdate.sort((a, b) => b.startLine - a.startLine)
 
   for (const block of blocksToUpdate) {
     const { startLine, endLine, id, modificationPercent, isGenerated } = block
 
-    // 根据修改百分比决定操作
-    let action: 'none' | 'modify' | 'remove' | 'ensure_id' = 'none'
+    // 保留原有缩进
+    const leadingSpaces = lines[startLine].match(/^\s*/)?.[0] || ''
 
-    if (isGenerated) {
-      // AI 生成状态下的决策
-      if (modificationPercent >= 70) {
-        action = 'remove'
-      }
-      else if (modificationPercent >= 10) {
-        action = 'modify'
-      }
-      else {
-        // 确保有ID
-        action = 'ensure_id'
-      }
-    }
-    else {
-      // AI 修改状态下的决策
-      if (modificationPercent >= 70) {
-        action = 'remove'
-      }
-      else if (modificationPercent > 0) {
-        // 更新修改百分比
-        action = 'modify'
-      }
-    }
+    // 决策逻辑
+    const action = getActionType(isGenerated, modificationPercent)
 
-    // 执行操作
     switch (action) {
       case 'remove':
-        // 删除标记
-        edit.delete(
-          document.uri,
-          new vscode.Range(startLine, 0, startLine + 1, 0),
-        )
-        edit.delete(
-          document.uri,
-          new vscode.Range(endLine, 0, endLine + 1, 0),
-        )
-
-        // 从快照中删除
+        edit.delete(document.uri, new vscode.Range(startLine, 0, startLine + 1, 0))
+        edit.delete(document.uri, new vscode.Range(endLine, 0, endLine + 1, 0))
         delete lastBlockSnapshots[filePath][id]
         break
 
       case 'modify':
-        // 更新为已修改状态
         edit.replace(
           document.uri,
           new vscode.Range(startLine, 0, startLine + 1, 0),
-          `// #region @ai_modified(${Math.round(modificationPercent)}%) id:${id}\n`,
+          `${leadingSpaces}// #region @ai_modified(${Math.round(modificationPercent)}%) id:${id}\n`,
         )
         break
 
       case 'ensure_id':
-        // 仅确保有ID
         if (!lines[startLine].includes('id:')) {
           edit.replace(
             document.uri,
             new vscode.Range(startLine, 0, startLine + 1, 0),
-            `// #region @ai_generated id:${id}\n`,
+            `${leadingSpaces}// #region @ai_generated id:${id}\n`,
           )
         }
-        break
-
-      case 'none':
-      default:
-        // 不做任何操作
         break
     }
   }
@@ -391,6 +332,22 @@ function processDocument(document: vscode.TextDocument) {
       document.save()
     }
   })
+}
+
+// 辅助方法：决定操作类型
+function getActionType(isGenerated: boolean, percent: number): 'remove' | 'modify' | 'ensure_id' | 'none' {
+  if (isGenerated) {
+    return percent >= 70
+      ? 'remove'
+      : percent >= 10
+        ? 'modify'
+        : 'ensure_id'
+  }
+  return percent >= 70
+    ? 'remove'
+    : percent > 0
+      ? 'modify'
+      : 'none'
 }
 
 // 累积修改百分比计算
